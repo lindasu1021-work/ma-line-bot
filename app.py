@@ -6,14 +6,16 @@ import base64
 import urllib.request
 import threading
 from flask import Flask, request, abort
-import anthropic
+import google.generativeai as genai
 
 app = Flask(__name__)
 
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 USER_ID = os.environ.get("LINE_USER_ID", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+genai.configure(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """你是嚴厲、專業的高階主管，正在對 MA 候選人 Verna 進行模擬面試批改。
 
@@ -59,17 +61,14 @@ def push_line_message(text: str):
 
 
 def process_message(user_text: str):
-    """背景執行：呼叫 Claude 並推播結果"""
     try:
         push_line_message("⏳ 模擬面試官批改中，請稍候 10 秒...")
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_text}]
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT
         )
-        feedback = response.content[0].text
+        response = model.generate_content(user_text)
+        feedback = response.text
         push_line_message(f"📋 模擬面試官批改結果：\n\n{feedback}")
     except Exception as e:
         push_line_message(f"❌ 批改時發生錯誤：{str(e)}")
@@ -95,7 +94,6 @@ def webhook():
         if not user_text:
             continue
 
-        # 立刻回傳 200，背景執行批改（避免 LINE 3 秒逾時）
         t = threading.Thread(target=process_message, args=(user_text,))
         t.daemon = True
         t.start()
@@ -105,7 +103,6 @@ def webhook():
 
 @app.route("/ping", methods=["GET"])
 def ping():
-    """防休眠用，讓 UptimeRobot 定時 ping"""
     return "pong", 200
 
 
