@@ -64,7 +64,7 @@ def process_message(user_text: str):
     try:
         push_line_message("⏳ 模擬面試官批改中，請稍候 10 秒...")
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-2.0-flash",
             system_instruction=SYSTEM_PROMPT
         )
         response = model.generate_content(user_text)
