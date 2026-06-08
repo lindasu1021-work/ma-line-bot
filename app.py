@@ -4,17 +4,12 @@ import hmac
 import hashlib
 import base64
 import urllib.request
+import threading
 from flask import Flask, request, abort
-
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
+import anthropic
 
 app = Flask(__name__)
 
-# 環境變數（在 Render 設定）
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 USER_ID = os.environ.get("LINE_USER_ID", "")
@@ -45,7 +40,6 @@ def verify_signature(body: bytes, signature: str) -> bool:
 
 
 def push_line_message(text: str):
-    """將訊息切割後推播至 LINE"""
     url = "https://api.line.me/v2/bot/message/push"
     chunks = [text[i:i+2000] for i in range(0, len(text), 2000)]
     for chunk in chunks:
@@ -64,36 +58,21 @@ def push_line_message(text: str):
         urllib.request.urlopen(req)
 
 
-def reply_line_message(reply_token: str, text: str):
-    """透過 reply token 回覆（較省配額）"""
-    url = "https://api.line.me/v2/bot/message/reply"
-    chunks = [text[i:i+2000] for i in range(0, len(text), 2000)]
-    messages = [{"type": "text", "text": chunk} for chunk in chunks[:5]]  # 最多 5 則
-    payload = json.dumps({
-        "replyToken": reply_token,
-        "messages": messages
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={
-            "Authorization": f"Bearer {LINE_TOKEN}",
-            "Content-Type": "application/json"
-        },
-        method="POST"
-    )
-    urllib.request.urlopen(req)
-
-
-def get_claude_feedback(user_answer: str) -> str:
-    """呼叫 Claude API 取得模擬面試官批改"""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_answer}]
-    )
-    return response.content[0].text
+def process_message(user_text: str):
+    """背景執行：呼叫 Claude 並推播結果"""
+    try:
+        push_line_message("⏳ 模擬面試官批改中，請稍候 10 秒...")
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_text}]
+        )
+        feedback = response.content[0].text
+        push_line_message(f"📋 模擬面試官批改結果：\n\n{feedback}")
+    except Exception as e:
+        push_line_message(f"❌ 批改時發生錯誤：{str(e)}")
 
 
 @app.route("/webhook", methods=["POST"])
@@ -113,20 +92,21 @@ def webhook():
             continue
 
         user_text = event["message"]["text"].strip()
-        reply_token = event.get("replyToken", "")
-
-        # 忽略加入好友的歡迎訊息
-        if user_text in ["", "加入好友"]:
+        if not user_text:
             continue
 
-        try:
-            reply_line_message(reply_token, "⏳ 模擬面試官批改中，請稍候...")
-            feedback = get_claude_feedback(user_text)
-            push_line_message(f"📋 模擬面試官批改結果：\n\n{feedback}")
-        except Exception as e:
-            push_line_message(f"❌ 批改時發生錯誤：{str(e)}")
+        # 立刻回傳 200，背景執行批改（避免 LINE 3 秒逾時）
+        t = threading.Thread(target=process_message, args=(user_text,))
+        t.daemon = True
+        t.start()
 
     return "OK", 200
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    """防休眠用，讓 UptimeRobot 定時 ping"""
+    return "pong", 200
 
 
 @app.route("/", methods=["GET"])
