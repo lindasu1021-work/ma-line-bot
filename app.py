@@ -6,16 +6,14 @@ import base64
 import urllib.request
 import threading
 from flask import Flask, request, abort
-import google.generativeai as genai
+from groq import Groq
 
 app = Flask(__name__)
 
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 USER_ID = os.environ.get("LINE_USER_ID", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-genai.configure(api_key=GEMINI_API_KEY)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 SYSTEM_PROMPT = """你是嚴厲、專業的高階主管，正在對 MA 候選人 Verna 進行模擬面試批改。
 
@@ -33,6 +31,18 @@ Verna 的背景：
 4. 【一句話總結】：最關鍵的一個改進點
 
 口吻：犀利、直接、有建設性，不要客套。"""
+
+HELP_TEXT = """👋 MA備戰衝衝衝 Bot 使用說明
+
+📋 觸發方式：
+「擬答：」+ 你的回答內容
+→ 模擬面試官將批改你的答案
+
+範例：
+擬答：我認為金控導入AI KYC應先從低風險客群開始Pilot，評估錯誤率後再逐步擴大...
+
+📅 每日日報：
+每天早上 8:00 自動推播"""
 
 
 def verify_signature(body: bytes, signature: str) -> bool:
@@ -60,15 +70,19 @@ def push_line_message(text: str):
         urllib.request.urlopen(req)
 
 
-def process_message(user_text: str):
+def process_feedback(user_text: str):
     try:
-        push_line_message("⏳ 模擬面試官批改中，請稍候 10 秒...")
-        model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=SYSTEM_PROMPT
+        push_line_message("⏳ 模擬面試官批改中，請稍候...")
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text}
+            ],
+            max_tokens=1500
         )
-        response = model.generate_content(user_text)
-        feedback = response.text
+        feedback = response.choices[0].message.content
         push_line_message(f"📋 模擬面試官批改結果：\n\n{feedback}")
     except Exception as e:
         push_line_message(f"❌ 批改時發生錯誤：{str(e)}")
@@ -94,9 +108,15 @@ def webhook():
         if not user_text:
             continue
 
-        t = threading.Thread(target=process_message, args=(user_text,))
-        t.daemon = True
-        t.start()
+        if user_text.startswith("擬答") or user_text.startswith("擬打"):
+            answer = user_text.split("：", 1)[-1].strip() if "：" in user_text else user_text[2:].strip()
+            t = threading.Thread(target=process_feedback, args=(answer,))
+            t.daemon = True
+            t.start()
+        elif user_text in ["說明", "help", "Help", "HELP", "?", "？"]:
+            push_line_message(HELP_TEXT)
+        else:
+            push_line_message('請用「擬答：」開頭輸入你的答案，例如：\n擬答：我認為應該先分析ROI...')
 
     return "OK", 200
 
